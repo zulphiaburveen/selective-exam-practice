@@ -126,7 +126,7 @@ attempts = cur.fetchall()
 if not attempts:
     st.info("No completed exam attempts yet.")
     if st.button("📝 Go to Exam", use_container_width=True):
-        st.switch_page("Exam.py")
+        st.switch_page("pages/Exam.py")
     conn.close()
     st.stop()
 
@@ -378,7 +378,7 @@ with latest_tab:
         st.session_state.start_time = None
         st.session_state.confirm_finish = False
         st.session_state.review_mode = False
-        st.switch_page("Exam.py")
+        st.switch_page("pages/Exam.py")
 
 
 with progress_tab:
