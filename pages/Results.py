@@ -9,8 +9,6 @@ st.set_page_config(page_title="Results", page_icon="🏆", layout="wide")
 st.title("🏆 Results & Self Review")
 init_db()
 
-conn = get_connection()
-cur = conn.cursor()
 student = st.session_state.get("student", "Rishan")
 
 
@@ -20,121 +18,31 @@ def parse_answer(value):
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
-def load_options(question_id):
-    cur.execute(
-        """
-        SELECT option_letter, option_text, is_correct
-        FROM options
-        WHERE question_id = ?
-        ORDER BY option_letter
-        """,
-        (question_id,),
-    )
-    return cur.fetchall()
-
-
 def answer_text(selected_answer, options):
     letters = parse_answer(selected_answer)
     if not letters:
         return "Not Answered"
+
     lookup = {row["option_letter"]: row["option_text"] for row in options}
-    return ", ".join(f"{letter}. {lookup.get(letter, '')}" for letter in letters)
-
-
-def load_attempt_answers(attempt_id):
-    cur.execute(
-        """
-        SELECT aa.id AS attempt_answer_id,
-               aa.question_id,
-               aa.selected_answer,
-               aa.is_correct,
-               q.question_number,
-               q.question_html,
-               q.question_image,
-               q.question_type,
-               q.passage_id,
-               p.title AS passage_title,
-               p.content AS passage_content,
-               p.image AS passage_image
-        FROM attempt_answers aa
-        JOIN questions q ON q.id = aa.question_id
-        LEFT JOIN passages p ON p.id = q.passage_id
-        WHERE aa.attempt_id = ?
-        ORDER BY q.question_number
-        """,
-        (attempt_id,),
+    return ", ".join(
+        f"{letter}. {lookup.get(letter, '')}"
+        for letter in letters
     )
-    return cur.fetchall()
 
 
-def latest_review_status(attempt_id):
-    cur.execute(
-        """
-        SELECT ra.id, ra.review_number, ra.score, ra.total, ra.review_date
-        FROM review_attempts ra
-        WHERE ra.attempt_id = ?
-        ORDER BY ra.review_number DESC, ra.id DESC
-        LIMIT 1
-        """,
-        (attempt_id,),
-    )
-    return cur.fetchone()
-
-
-def corrected_question_ids(attempt_id):
-    cur.execute(
-        """
-        SELECT DISTINCT rans.question_id
-        FROM review_answers rans
-        JOIN review_attempts ra ON ra.id = rans.review_attempt_id
-        WHERE ra.attempt_id = ? AND rans.is_correct = 1
-        """,
-        (attempt_id,),
-    )
-    return {row["question_id"] for row in cur.fetchall()}
-
-
-def attempt_number_for(row):
-    cur.execute(
-        """
-        SELECT COUNT(*)
-        FROM attempts
-        WHERE paper_id = ? AND student = ? AND id <= ?
-        """,
-        (row["paper_id"], student, row["id"]),
-    )
-    return cur.fetchone()[0]
-
-
-# -------------------------------------------------------
-# LOAD ATTEMPTS
-# -------------------------------------------------------
-cur.execute(
-    """
-    SELECT a.id, a.paper_id, a.score, a.total, a.percentage,
-           a.time_taken, a.timer_minutes, a.attempt_date, p.name AS paper_name,
-           p.subject, p.year
-    FROM attempts a
-    JOIN papers p ON p.id = a.paper_id
-    WHERE a.student = ?
-    ORDER BY a.id DESC
-    """,
-    (student,),
-)
-attempts = cur.fetchall()
+# Always load the authoritative history for the student.
+# Publishing a different paper must never change which historical attempts exist.
+attempts = get_attempts(student)
 
 if not attempts:
     st.info("No completed exam attempts yet.")
-    if st.button("📝 Go to Exam", use_container_width=True):
+    if st.button("📝 Go to Exam", width="stretch"):
         st.switch_page("pages/Exam.py")
-    conn.close()
     st.stop()
 
+# Latest Result means latest completed attempt across all papers.
 latest_attempt = attempts[0]
 
-# -------------------------------------------------------
-# TABS
-# -------------------------------------------------------
 latest_tab, progress_tab = st.tabs(["🏆 Latest Result", "📈 Progress & History"])
 
 with latest_tab:
@@ -147,21 +55,37 @@ with latest_tab:
         f"{attempt['subject']} • {attempt['year']}"
     )
 
-    attempt_number = attempt_number_for(attempt)
+    attempt_number = attempt_number_for(
+        attempt["paper_id"],
+        student,
+        attempt_id,
+    )
+
     m1, m2, m3 = st.columns(3)
     with m1:
         st.metric("Score", f"{attempt['score']}/{attempt['total']}")
     with m2:
         st.metric("Percentage", f"{attempt['percentage']}%")
     with m3:
-        minutes, seconds = divmod(attempt["time_taken"], 60)
+        minutes, seconds = divmod(int(attempt["time_taken"]), 60)
         st.metric("Time Taken", f"{minutes:02d}:{seconds:02d}")
+
     st.caption(f"Attempt #{attempt_number} • {attempt['attempt_date']}")
 
-    answers = load_attempt_answers(attempt_id)
+    answers = get_attempt_answers(attempt_id)
     original_incorrect = [row for row in answers if not row["is_correct"]]
-    corrected_ids = corrected_question_ids(attempt_id)
-    remaining = [row for row in original_incorrect if row["question_id"] not in corrected_ids]
+
+    is_just_finished = (
+        attempt_id == st.session_state.get("current_attempt_id")
+        and st.session_state.get("_latest_attempt_snapshot", {}).get("id") == attempt_id
+    )
+
+    corrected_ids = set() if is_just_finished else corrected_question_ids(attempt_id)
+    remaining = [
+        row
+        for row in original_incorrect
+        if row["question_id"] not in corrected_ids
+    ]
 
     original_correct = len(answers) - len(original_incorrect)
     corrected_count = len(original_incorrect) - len(remaining)
@@ -171,13 +95,26 @@ with latest_tab:
 
     st.divider()
     st.markdown("### Exam → Self-Review Progress")
+
     r1, r2, r3 = st.columns(3)
     with r1:
-        st.metric("Original Exam", f"{attempt['score']}/{attempt['total']}", f"{attempt['percentage']}%")
+        st.metric(
+            "Original Exam",
+            f"{attempt['score']}/{attempt['total']}",
+            f"{attempt['percentage']}%",
+        )
     with r2:
-        st.metric("After Self Review", f"{reviewed_score}/{len(answers)}", f"{reviewed_percentage}%")
+        st.metric(
+            "After Self Review",
+            f"{reviewed_score}/{len(answers)}",
+            f"{reviewed_percentage}%",
+        )
     with r3:
-        st.metric("Improvement", f"+{corrected_count} question(s)", f"{improvement_pp:+.1f} pp")
+        st.metric(
+            "Improvement",
+            f"+{corrected_count} question(s)",
+            f"{improvement_pp:+.1f} pp",
+        )
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -187,7 +124,7 @@ with latest_tab:
     with c3:
         st.metric("❌ Still to Review", len(remaining))
 
-    last_review = latest_review_status(attempt_id)
+    last_review = None if is_just_finished else latest_review_status(attempt_id)
     if last_review:
         st.caption(
             f"Latest self-review: #{last_review['review_number']} • "
@@ -198,7 +135,9 @@ with latest_tab:
     if not original_incorrect:
         st.success("All questions were correct in this exam. No self-review is needed.")
     elif not remaining:
-        st.success("All questions that were incorrect in the exam have now been corrected through self-review.")
+        st.success(
+            "All questions that were incorrect in the exam have now been corrected through self-review."
+        )
     else:
         review_mode = st.session_state.get("review_mode", False)
 
@@ -209,17 +148,19 @@ with latest_tab:
                 + ", ".join(str(row["question_number"]) for row in remaining)
             )
             st.caption(
-                "The correct answers stay hidden. Review all remaining questions, choose new answers, "
-                "then submit the whole review together."
+                "The correct answers stay hidden. Review all remaining questions, "
+                "choose new answers, then submit the whole review together."
             )
+
             if st.button(
                 f"🔍 Start Self Review — {len(remaining)} Question(s)",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state.review_mode = True
                 st.session_state.review_version = st.session_state.get("review_version", 0) + 1
                 st.rerun()
+
         else:
             st.markdown("## 🔍 Self Review")
             st.info(
@@ -237,25 +178,35 @@ with latest_tab:
 
                 if row["passage_id"]:
                     st.markdown(f"### 📖 {row['passage_title'] or 'Passage'}")
+
                     if row["passage_content"]:
                         st.markdown(row["passage_content"], unsafe_allow_html=True)
+
                     if row["passage_image"]:
-                        passage_path = Path(row["passage_image"])
-                        if passage_path.exists():
-                            st.image(str(passage_path), use_container_width=True)
+                        passage_image = displayable_file(row["passage_image"])
+                        if passage_image:
+                            st.image(passage_image, width="stretch")
+
                     st.divider()
 
                 if row["question_html"]:
                     st.markdown(row["question_html"], unsafe_allow_html=True)
-                if row["question_image"]:
-                    question_path = Path(row["question_image"])
-                    if question_path.exists():
-                        st.image(str(question_path), width=600)
 
-                options = load_options(row["question_id"])
-                st.warning(f"Your exam answer: **{answer_text(row['selected_answer'], options)}**")
+                if row["question_image"]:
+                    question_image = displayable_file(row["question_image"])
+                    if question_image:
+                        st.image(question_image, width=600)
+
+                options = get_options(row["question_id"])
+                st.warning(
+                    f"Your exam answer: **{answer_text(row['selected_answer'], options)}**"
+                )
+
                 option_letters = [option["option_letter"] for option in options]
-                option_lookup = {option["option_letter"]: option["option_text"] for option in options}
+                option_lookup = {
+                    option["option_letter"]: option["option_text"]
+                    for option in options
+                }
                 base_key = f"batch_review_{attempt_id}_{review_version}_{row['question_id']}"
 
                 if row["question_type"] == "single":
@@ -281,77 +232,74 @@ with latest_tab:
 
             st.divider()
             submit_col, cancel_col = st.columns(2)
+
             with submit_col:
-                if st.button("✅ Submit Self Review", type="primary", use_container_width=True):
+                if st.button(
+                    "✅ Submit Self Review",
+                    type="primary",
+                    width="stretch",
+                ):
                     unanswered = [
                         row["question_number"]
                         for row in remaining
                         if not review_responses.get(row["question_id"])
                     ]
+
                     if unanswered:
                         st.error(
                             "Answer every review question before submitting. Missing: "
                             + ", ".join(map(str, unanswered))
                         )
                     else:
-                        cur.execute(
-                            "SELECT COUNT(*) FROM review_attempts WHERE attempt_id = ?",
-                            (attempt_id,),
-                        )
-                        review_number = cur.fetchone()[0] + 1
-                        evaluated = []
+                        existing_reviews = get_review_attempts(attempt_id)
+                        review_number = len(existing_reviews) + 1
                         review_score = 0
+                        evaluated = []
 
                         for row in remaining:
-                            options = load_options(row["question_id"])
+                            options = get_options(row["question_id"])
                             correct_letters = {
-                                option["option_letter"] for option in options if option["is_correct"]
+                                option["option_letter"]
+                                for option in options
+                                if option["is_correct"]
                             }
                             selected = review_responses[row["question_id"]]
                             is_correct = set(selected) == correct_letters
+
                             if is_correct:
                                 review_score += 1
-                            evaluated.append((row, selected, is_correct))
 
-                        cur.execute(
-                            """
-                            INSERT INTO review_attempts(attempt_id, review_number, score, total)
-                            VALUES (?, ?, ?, ?)
-                            """,
-                            (attempt_id, review_number, review_score, len(remaining)),
-                        )
-                        review_attempt_id = cur.lastrowid
-
-                        for row, selected, is_correct in evaluated:
-                            cur.execute(
-                                """
-                                INSERT INTO review_answers(
-                                    review_attempt_id, question_id, selected_answer, is_correct
-                                ) VALUES (?, ?, ?, ?)
-                                """,
-                                (
-                                    review_attempt_id,
-                                    row["question_id"],
-                                    ",".join(sorted(selected)),
-                                    1 if is_correct else 0,
-                                ),
+                            evaluated.append(
+                                {
+                                    "question_id": row["question_id"],
+                                    "question_number": row["question_number"],
+                                    "selected_answer": ",".join(sorted(selected)),
+                                    "is_correct": is_correct,
+                                }
                             )
 
-                        conn.commit()
+                        create_review_attempt(
+                            attempt_id,
+                            review_number,
+                            review_score,
+                            len(remaining),
+                            evaluated,
+                        )
+
                         st.session_state.review_mode = False
                         st.session_state.review_result = {
                             "number": review_number,
                             "score": review_score,
                             "total": len(remaining),
                             "items": [
-                                (row["question_number"], is_correct)
-                                for row, _, is_correct in evaluated
+                                (item["question_number"], item["is_correct"])
+                                for item in evaluated
                             ],
                         }
                         st.rerun()
 
             with cancel_col:
-                if st.button("Cancel Review", use_container_width=True):
+                if st.button("Cancel Review", width="stretch"):
                     st.session_state.review_mode = False
                     st.rerun()
 
@@ -364,13 +312,15 @@ with latest_tab:
             "questions in this review."
         )
         for qn, is_correct in review_result["items"]:
-            st.write(f"{'✅' if is_correct else '❌'} Question {qn} — {'Corrected' if is_correct else 'Still needs review'}")
+            st.write(
+                f"{'✅' if is_correct else '❌'} Question {qn} — "
+                f"{'Corrected' if is_correct else 'Still needs review'}"
+            )
         st.caption("Correct answers remain hidden for questions that still need review.")
 
     st.divider()
-    if st.button("📝 Take Exam Again", use_container_width=True):
+    if st.button("📝 Take Exam Again", width="stretch"):
         st.session_state.started = False
-        st.session_state.show_results = False
         st.session_state.paper_id = None
         st.session_state.paper_name = None
         st.session_state.question_index = 0
@@ -395,12 +345,14 @@ with progress_tab:
         f"{row['paper_name']} ({row['year']})": row["paper_id"]
         for row in paper_rows
     }
+
     default_paper_id = latest_attempt["paper_id"]
     labels = list(paper_lookup.keys())
     default_label_index = next(
         (i for i, label in enumerate(labels) if paper_lookup[label] == default_paper_id),
         0,
     )
+
     selected_paper_label = st.selectbox(
         "Paper",
         labels,
@@ -409,17 +361,22 @@ with progress_tab:
     )
     selected_paper_id = paper_lookup[selected_paper_label]
 
-    paper_attempts = [row for row in reversed(attempts) if row["paper_id"] == selected_paper_id]
+    paper_attempts = [
+        row
+        for row in reversed(attempts)
+        if row["paper_id"] == selected_paper_id
+    ]
 
     history = []
     for i, row in enumerate(paper_attempts, start=1):
-        minutes, seconds = divmod(row["time_taken"], 60)
-        timer_minutes = row["timer_minutes"]
+        minutes, seconds = divmod(int(row["time_taken"]), 60)
+        timer_minutes = row.get("timer_minutes")
         time_used_percentage = (
-            round(row["time_taken"] / (timer_minutes * 60) * 100, 1)
-            if timer_minutes and timer_minutes > 0
+            round(int(row["time_taken"]) / (int(timer_minutes) * 60) * 100, 1)
+            if timer_minutes and int(timer_minutes) > 0
             else None
         )
+
         history.append(
             {
                 "Attempt": i,
@@ -450,23 +407,21 @@ with progress_tab:
     st.markdown("### Score & Time Comparison")
     st.caption(
         "Score % shows accuracy. Time Used % shows how much of the selected exam time was used. "
-        "Lower time use together with maintained or improving accuracy can indicate growing fluency."
+        "Compare them together rather than treating either measure alone as the goal."
     )
+
     comparison_df = chart_df[["Score %", "Time Used %"]]
     if comparison_df["Time Used %"].notna().any():
         st.line_chart(comparison_df)
     else:
         st.info(
-            "Time comparison will appear for new attempts. Older attempts were saved before the selected exam duration was recorded."
+            "Time comparison will appear for new attempts. Older attempts were saved before "
+            "the selected exam duration was recorded."
         )
         st.line_chart(chart_df[["Score %"]])
 
     st.markdown("### Exam History")
-    display_df = pd.DataFrame(history)[["Attempt", "Date", "Score", "Score %", "Time", "Exam Time", "Time Used %"]]
-    st.dataframe(display_df.iloc[::-1], hide_index=True, use_container_width=True)
-
-    st.caption(
-        "Progress is shown from practice history. Compare accuracy and time together rather than treating either measure alone as the goal."
-    )
-
-conn.close()
+    display_df = pd.DataFrame(history)[
+        ["Attempt", "Date", "Score", "Score %", "Time", "Exam Time", "Time Used %"]
+    ]
+    st.dataframe(display_df.iloc[::-1], hide_index=True, width="stretch")

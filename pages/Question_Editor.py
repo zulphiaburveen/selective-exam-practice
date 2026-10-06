@@ -1,48 +1,43 @@
 import os
 from pathlib import Path
+
 import streamlit as st
 from streamlit_quill import st_quill
+
 from utils.storage import *
 
 st.set_page_config(page_title="Question Editor", page_icon="✏️", layout="wide")
 st.title("✏️ Question Editor")
 init_db()
-conn = get_connection(); cur = conn.cursor()
 
-# Papers
-cur.execute("SELECT id,name,folder FROM papers ORDER BY name")
-papers = cur.fetchall()
+papers = get_papers()
 if not papers:
-    st.warning("No papers available."); st.info("Create a paper first from Admin."); conn.close(); st.stop()
+    st.warning("No papers available.")
+    st.info("Create a paper first from Admin.")
+    st.stop()
+
 paper_lookup = {p["name"]: p for p in papers}
 selected_paper = st.selectbox("Paper", list(paper_lookup.keys()), key="question_paper")
-paper = paper_lookup[selected_paper]; paper_id = paper["id"]
+paper = paper_lookup[selected_paper]
+paper_id = paper["id"]
 
-# Passages for selected paper
-cur.execute("SELECT id,title FROM passages WHERE paper_id=? ORDER BY display_order", (paper_id,))
-passage_rows = cur.fetchall()
+passage_rows = get_passages(paper_id)
 passage_lookup = {"No Passage": None}
-for p in passage_rows: passage_lookup[p["title"]] = p["id"]
+for passage in passage_rows:
+    passage_lookup[passage["title"]] = passage["id"]
 
-# State
 st.session_state.setdefault("editor_version", 0)
 st.session_state.setdefault("question_edit_id", None)
 edit_id = st.session_state.question_edit_id
-edit_row = None
-edit_options = []
-if edit_id is not None:
-    cur.execute("SELECT * FROM questions WHERE id=? AND paper_id=?", (edit_id, paper_id))
-    edit_row = cur.fetchone()
-    if edit_row:
-        cur.execute("SELECT option_letter,option_text,is_correct FROM options WHERE question_id=? ORDER BY option_letter", (edit_id,))
-        edit_options = cur.fetchall()
-    else:
-        st.session_state.question_edit_id = None; edit_id = None
+edit_row = get_question(edit_id) if edit_id is not None else None
+edit_options = get_options(edit_id) if edit_row else []
 
-cur.execute("SELECT COALESCE(MAX(question_number),0)+1 FROM questions WHERE paper_id=?", (paper_id,))
-next_question = cur.fetchone()[0]
+if edit_id is not None and edit_row is None:
+    st.session_state.question_edit_id = None
+    edit_id = None
 
-# Defaults for add/edit
+next_question = next_question_number(paper_id)
+
 if edit_row:
     question_number = int(edit_row["question_number"])
     default_html = edit_row["question_html"] or ""
@@ -55,187 +50,340 @@ if edit_row:
     st.header(f"✏️ Edit Question {question_number}")
 else:
     question_number = int(next_question)
-    default_html = ""; default_image = None; default_type = "Single Choice"; default_passage_id = None
-    option_count_default = 4; option_defaults = {}; correct_defaults = set()
+    default_html = ""
+    default_image = None
+    default_type = "Single Choice"
+    default_passage_id = None
+    option_count_default = 4
+    option_defaults = {}
+    correct_defaults = set()
 
-# Passage selector is part of editor so edit can reassign it
 passage_names = list(passage_lookup.keys())
 default_passage_name = "No Passage"
 for name, pid in passage_lookup.items():
-    if pid == default_passage_id: default_passage_name = name; break
-selected_passage = st.selectbox("Passage", passage_names, index=passage_names.index(default_passage_name), key=f"passage_select_{edit_id or 'new'}_{st.session_state.editor_version}")
+    if pid == default_passage_id:
+        default_passage_name = name
+        break
+
+selected_passage = st.selectbox(
+    "Passage",
+    passage_names,
+    index=passage_names.index(default_passage_name),
+    key=f"passage_select_{edit_id or 'new'}_{st.session_state.editor_version}",
+)
 passage_id = passage_lookup[selected_passage]
+
 st.info(f"Paper: {selected_paper}")
 st.metric("Question Number", question_number)
 
 version = st.session_state.editor_version
 form_key = f"question_form_{edit_id or 'new'}_{version}"
+
 with st.form(form_key):
     st.subheader("Question")
-    question_html = st_quill(value=default_html, html=True, placeholder="Paste question from Word...", key=f"question_editor_{edit_id or 'new'}_{version}")
+    question_html = st_quill(
+        value=default_html,
+        html=True,
+        placeholder="Paste question from Word...",
+        key=f"question_editor_{edit_id or 'new'}_{version}",
+    )
 
-    st.divider(); st.subheader("Question Image")
-    if default_image and Path(default_image).exists():
-        st.caption("Current image"); st.image(default_image, width=450)
-    question_image = st.file_uploader("Replace / upload image", type=["png","jpg","jpeg"], key=f"question_image_{edit_id or 'new'}_{version}")
+    st.divider()
+    st.subheader("Question Image")
+    current_image = displayable_file(default_image)
+    if current_image:
+        st.caption("Current image")
+        st.image(current_image, width=450)
+
+    question_image = st.file_uploader(
+        "Replace / upload image",
+        type=["png", "jpg", "jpeg"],
+        key=f"question_image_{edit_id or 'new'}_{version}",
+    )
+
     remove_image = st.checkbox("Remove current image", value=False) if edit_row and default_image else False
 
     st.divider()
     type_options = ["Single Choice", "Multiple Choice"]
-    question_type = st.radio("Question Type", type_options, index=type_options.index(default_type), horizontal=True, key=f"question_type_{edit_id or 'new'}_{version}")
+    question_type = st.radio(
+        "Question Type",
+        type_options,
+        index=type_options.index(default_type),
+        horizontal=True,
+        key=f"question_type_{edit_id or 'new'}_{version}",
+    )
 
-    st.divider(); st.subheader("Answer Options")
+    st.divider()
+    st.subheader("Answer Options")
     st.caption("Dynamic options are supported. For True/False use A = True and B = False.")
-    option_count = st.number_input("Number of Options", min_value=2, max_value=12, value=option_count_default, step=1, key=f"option_count_{edit_id or 'new'}_{version}")
-    letters = [chr(65+i) for i in range(int(option_count))]
-    option_values = {}; correct_answers = []
+
+    option_count = st.number_input(
+        "Number of Options",
+        min_value=2,
+        max_value=12,
+        value=option_count_default,
+        step=1,
+        key=f"option_count_{edit_id or 'new'}_{version}",
+    )
+
+    letters = [chr(65 + i) for i in range(int(option_count))]
+    option_values = {}
+    correct_answers = []
 
     if question_type == "Single Choice":
         for letter in letters:
-            c1,c2 = st.columns([1,12])
-            with c1: st.markdown(f"### {letter}")
+            c1, c2 = st.columns([1, 12])
+            with c1:
+                st.markdown(f"### {letter}")
             with c2:
-                option_values[letter] = st.text_area(f"Option {letter}", value=option_defaults.get(letter,""), key=f"option_{letter}_{edit_id or 'new'}_{version}", label_visibility="collapsed", height=80)
+                option_values[letter] = st.text_area(
+                    f"Option {letter}",
+                    value=option_defaults.get(letter, ""),
+                    key=f"option_{letter}_{edit_id or 'new'}_{version}",
+                    label_visibility="collapsed",
+                    height=80,
+                )
+
         default_correct = next(iter(correct_defaults), None)
         default_index = letters.index(default_correct) if default_correct in letters else None
-        correct_single = st.radio("Correct Answer", letters, index=default_index, horizontal=True, key=f"correct_single_{edit_id or 'new'}_{version}")
-        if correct_single: correct_answers = [correct_single]
+        correct_single = st.radio(
+            "Correct Answer",
+            letters,
+            index=default_index,
+            horizontal=True,
+            key=f"correct_single_{edit_id or 'new'}_{version}",
+        )
+        if correct_single:
+            correct_answers = [correct_single]
     else:
-        # IMPORTANT: all multiple-choice option keys are versioned too.
-        # The old file used fixed option_A/option_B keys here, which caused stale state.
         for letter in letters:
-            c1,c2,c3 = st.columns([1,10,2])
-            with c1: st.markdown(f"### {letter}")
+            c1, c2, c3 = st.columns([1, 10, 2])
+            with c1:
+                st.markdown(f"### {letter}")
             with c2:
-                option_values[letter] = st.text_area(f"Option {letter}", value=option_defaults.get(letter,""), key=f"option_{letter}_{edit_id or 'new'}_{version}", label_visibility="collapsed", height=80)
+                option_values[letter] = st.text_area(
+                    f"Option {letter}",
+                    value=option_defaults.get(letter, ""),
+                    key=f"option_{letter}_{edit_id or 'new'}_{version}",
+                    label_visibility="collapsed",
+                    height=80,
+                )
             with c3:
-                checked = st.checkbox("Correct", value=(letter in correct_defaults), key=f"correct_{letter}_{edit_id or 'new'}_{version}")
-                if checked: correct_answers.append(letter)
+                checked = st.checkbox(
+                    "Correct",
+                    value=(letter in correct_defaults),
+                    key=f"correct_{letter}_{edit_id or 'new'}_{version}",
+                )
+                if checked:
+                    correct_answers.append(letter)
 
-    st.divider(); st.subheader("Option Preview")
-    valid_preview = {k:v for k,v in option_values.items() if v and v.strip()}
+    st.divider()
+    st.subheader("Option Preview")
+    valid_preview = {k: v for k, v in option_values.items() if v and v.strip()}
     if valid_preview:
-        for letter,text in valid_preview.items():
-            st.markdown(f"**{letter}. {text}** ✓" if letter in correct_answers else f"{letter}. {text}")
+        for letter, text in valid_preview.items():
+            if letter in correct_answers:
+                st.markdown(f"**{letter}. {text}** ✓")
+            else:
+                st.markdown(f"{letter}. {text}")
     else:
         st.caption("Enter the answer options above.")
 
     st.divider()
     if edit_row:
-        c1,c2 = st.columns(2)
-        with c1: save = st.form_submit_button("💾 Update Question", type="primary", use_container_width=True)
-        with c2: cancel = st.form_submit_button("Cancel", use_container_width=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            save = st.form_submit_button("💾 Update Question", type="primary", width="stretch")
+        with c2:
+            cancel = st.form_submit_button("Cancel", width="stretch")
         save_new = False
     else:
-        c1,c2 = st.columns(2)
-        with c1: save = st.form_submit_button("💾 Save", use_container_width=True)
-        with c2: save_new = st.form_submit_button("💾 Save & New Question", use_container_width=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            save = st.form_submit_button("💾 Save", width="stretch")
+        with c2:
+            save_new = st.form_submit_button("💾 Save & New Question", width="stretch")
         cancel = False
 
 if cancel:
-    st.session_state.question_edit_id = None; st.session_state.editor_version += 1; st.rerun()
+    st.session_state.question_edit_id = None
+    st.session_state.editor_version += 1
+    st.rerun()
 
 if save or save_new:
     errors = []
+
     if not question_html or not question_html.strip() or question_html.strip() in ("<p><br></p>", "<p></p>"):
         errors.append("Question text is required.")
-    valid_options = {k:v.strip() for k,v in option_values.items() if v and v.strip()}
-    if len(valid_options) < 2: errors.append("At least two answer options are required.")
-    if not correct_answers: errors.append("Select at least one correct answer.")
-    if question_type == "Single Choice" and len(correct_answers) != 1: errors.append("Single Choice must have exactly one correct answer.")
+
+    valid_options = {k: v.strip() for k, v in option_values.items() if v and v.strip()}
+
+    if len(valid_options) < 2:
+        errors.append("At least two answer options are required.")
+    if not correct_answers:
+        errors.append("Select at least one correct answer.")
+    if question_type == "Single Choice" and len(correct_answers) != 1:
+        errors.append("Single Choice must have exactly one correct answer.")
     for letter in correct_answers:
-        if letter not in valid_options: errors.append(f"Correct option {letter} does not contain any text.")
+        if letter not in valid_options:
+            errors.append(f"Correct option {letter} does not contain any text.")
 
     if errors:
         st.error("Please fix the following before saving:")
-        for e in errors: st.write(f"• {e}")
+        for error in errors:
+            st.write(f"• {error}")
     else:
         try:
             saved_image = default_image
-            qdir = Path("papers") / paper["folder"] / "questions"; qdir.mkdir(parents=True, exist_ok=True)
+
             if remove_image and default_image:
-                old = Path(default_image)
-                if old.exists():
-                    try: old.unlink()
-                    except Exception: pass
-                saved_image = None
-            if question_image is not None:
-                if default_image:
+                if is_remote_file(default_image):
+                    delete_storage_file_by_url(default_image)
+                else:
                     old = Path(default_image)
                     if old.exists():
-                        try: old.unlink()
-                        except Exception: pass
-                ext = os.path.splitext(question_image.name)[1].lower() or ".png"
-                path = qdir / f"q{question_number}{ext}"
-                path.write_bytes(question_image.getbuffer())
-                saved_image = str(path).replace("\\", "/")
+                        try:
+                            old.unlink()
+                        except Exception:
+                            pass
+                saved_image = None
+
+            if question_image is not None:
+                if default_image and is_remote_file(default_image):
+                    delete_storage_file_by_url(default_image)
+
+                extension = os.path.splitext(question_image.name)[1].lower() or ".png"
+                object_path = f"papers/{paper_id}/questions/q{question_number}{extension}"
+                saved_image = upload_file_bytes(
+                    object_path,
+                    question_image.getvalue(),
+                    question_image.type or None,
+                )
 
             db_type = "single" if question_type == "Single Choice" else "multiple"
+
             if edit_row:
-                cur.execute("UPDATE questions SET passage_id=?,question_html=?,question_image=?,question_type=? WHERE id=?", (passage_id,question_html,saved_image,db_type,edit_id))
-                # Rebuild options atomically; simpler and avoids stale removed options.
-                cur.execute("DELETE FROM options WHERE question_id=?", (edit_id,))
+                update_question(edit_id, passage_id, question_html, saved_image, db_type)
                 target_id = edit_id
             else:
-                cur.execute("INSERT INTO questions(paper_id,passage_id,question_number,question_html,question_image,question_type) VALUES(?,?,?,?,?,?)", (paper_id,passage_id,question_number,question_html,saved_image,db_type))
-                target_id = cur.lastrowid
+                created = add_question(
+                    paper_id,
+                    passage_id,
+                    question_number,
+                    question_html,
+                    saved_image,
+                    db_type,
+                )
+                target_id = created["id"]
 
-            for letter,text in valid_options.items():
-                cur.execute("INSERT INTO options(question_id,option_letter,option_text,is_correct) VALUES(?,?,?,?)", (target_id,letter,text,1 if letter in correct_answers else 0))
-            conn.commit()
+            option_payload = []
+            for letter, text in valid_options.items():
+                option_payload.append(
+                    {
+                        "question_id": target_id,
+                        "option_letter": letter,
+                        "option_text": text,
+                        "is_correct": letter in correct_answers,
+                    }
+                )
+
+            replace_options(target_id, option_payload)
             st.success(f"Question {question_number} {'updated' if edit_row else 'saved'} successfully.")
+
             if edit_row or save_new:
                 st.session_state.question_edit_id = None
                 st.session_state.editor_version += 1
                 st.rerun()
-        except Exception as e:
-            conn.rollback(); st.error("Unable to save the question."); st.exception(e)
 
-# Existing questions
-st.divider(); st.header("📚 Existing Questions")
-cur.execute("""
-SELECT q.id,q.question_number,q.question_html,q.question_image,q.question_type,p.title AS passage_title
-FROM questions q LEFT JOIN passages p ON q.passage_id=p.id
-WHERE q.paper_id=? ORDER BY q.question_number
-""", (paper_id,))
-questions = cur.fetchall()
+        except Exception as e:
+            st.error("Unable to save the question.")
+            st.exception(e)
+
+st.divider()
+st.header("📚 Existing Questions")
+questions = get_questions(paper_id)
+
 if not questions:
     st.info("No questions have been added to this paper yet.")
 else:
-    for q in questions:
-        qid=q["id"]; ptitle=q["passage_title"] or "No Passage"; qtype="Single Choice" if q["question_type"]=="single" else "Multiple Choice"
-        with st.expander(f"Question {q['question_number']} — {ptitle} — {qtype}"):
-            if q["question_html"]: st.markdown(q["question_html"], unsafe_allow_html=True)
-            if q["question_image"] and Path(q["question_image"]).exists(): st.image(q["question_image"], width=450)
-            cur.execute("SELECT option_letter,option_text,is_correct FROM options WHERE question_id=? ORDER BY option_letter", (qid,))
-            opts=cur.fetchall()
-            st.markdown("#### Options")
-            for o in opts:
-                st.markdown(f"**{o['option_letter']}. {o['option_text']}** ✓" if o["is_correct"] else f"{o['option_letter']}. {o['option_text']}")
-            c1,c2=st.columns(2)
-            with c1:
-                if st.button("✏️ Edit Question", key=f"edit_question_{qid}", use_container_width=True):
-                    st.session_state.question_edit_id=qid; st.session_state.editor_version += 1; st.rerun()
-            with c2:
-                confirm=f"confirm_delete_{qid}"
-                if not st.session_state.get(confirm,False):
-                    if st.button("🗑️ Delete Question", key=f"delete_question_{qid}", use_container_width=True):
-                        st.session_state[confirm]=True; st.rerun()
-                else:
-                    st.warning(f"Delete Question {q['question_number']}?")
-                    y,n=st.columns(2)
-                    with y:
-                        if st.button("Yes, Delete", key=f"yes_delete_{qid}", type="primary", use_container_width=True):
-                            try:
-                                cur.execute("DELETE FROM options WHERE question_id=?",(qid,)); cur.execute("DELETE FROM questions WHERE id=?",(qid,)); conn.commit()
-                                if q["question_image"] and Path(q["question_image"]).exists():
-                                    try: Path(q["question_image"]).unlink()
-                                    except Exception: pass
-                                st.session_state.pop(confirm,None); st.rerun()
-                            except Exception as e:
-                                conn.rollback(); st.error("Unable to delete the question."); st.exception(e)
-                    with n:
-                        if st.button("Cancel", key=f"cancel_delete_{qid}", use_container_width=True):
-                            st.session_state.pop(confirm,None); st.rerun()
+    for question in questions:
+        question_id = question["id"]
+        passage_title = question["passage_title"] or "No Passage"
+        question_type_display = "Single Choice" if question["question_type"] == "single" else "Multiple Choice"
 
-conn.close()
+        with st.expander(
+            f"Question {question['question_number']} — {passage_title} — {question_type_display}"
+        ):
+            if question["question_html"]:
+                st.markdown(question["question_html"], unsafe_allow_html=True)
+
+            question_image_url = displayable_file(question["question_image"])
+            if question_image_url:
+                st.image(question_image_url, width=450)
+
+            options = get_options(question_id)
+            st.markdown("#### Options")
+            for option in options:
+                if option["is_correct"]:
+                    st.markdown(f"**{option['option_letter']}. {option['option_text']}** ✓")
+                else:
+                    st.markdown(f"{option['option_letter']}. {option['option_text']}")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button(
+                    "✏️ Edit Question",
+                    key=f"edit_question_{question_id}",
+                    width="stretch",
+                ):
+                    st.session_state.question_edit_id = question_id
+                    st.session_state.editor_version += 1
+                    st.rerun()
+
+            with c2:
+                confirm_key = f"confirm_delete_{question_id}"
+                if not st.session_state.get(confirm_key, False):
+                    if st.button(
+                        "🗑️ Delete Question",
+                        key=f"delete_question_{question_id}",
+                        width="stretch",
+                    ):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+                else:
+                    st.warning(f"Delete Question {question['question_number']}?")
+                    yes_col, no_col = st.columns(2)
+
+                    with yes_col:
+                        if st.button(
+                            "Yes, Delete",
+                            key=f"yes_delete_{question_id}",
+                            type="primary",
+                            width="stretch",
+                        ):
+                            try:
+                                if question["question_image"]:
+                                    if is_remote_file(question["question_image"]):
+                                        delete_storage_file_by_url(question["question_image"])
+                                    else:
+                                        legacy = Path(question["question_image"])
+                                        if legacy.exists():
+                                            try:
+                                                legacy.unlink()
+                                            except Exception:
+                                                pass
+                                delete_question(question_id)
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                            except Exception as e:
+                                st.error("Unable to delete the question.")
+                                st.exception(e)
+
+                    with no_col:
+                        if st.button(
+                            "Cancel",
+                            key=f"cancel_delete_{question_id}",
+                            width="stretch",
+                        ):
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
