@@ -36,6 +36,12 @@ question_editor_page = st.Page(
     icon="✏️"
 )
 
+ai_importer_page = st.Page(
+    "pages/AI_Importer.py",
+    title="AI Importer",
+    icon="🤖"
+)
+
 
 # =======================================================
 # NAVIGATION
@@ -50,6 +56,7 @@ pages = {
         admin_page,
         passages_page,
         question_editor_page,
+        ai_importer_page,
     ],
 }
 
