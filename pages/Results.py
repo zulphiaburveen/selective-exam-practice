@@ -153,8 +153,8 @@ with latest_tab:
                 + ", ".join(str(row["question_number"]) for row in remaining)
             )
             st.caption(
-                "The correct answers stay hidden. Review all remaining questions, "
-                "choose new answers, then submit the whole review together."
+                "The correct answers stay hidden. Work on the questions you understand now. "
+                "You may leave others unanswered and return to them in a later self-review."
             )
 
             if st.button(
@@ -169,8 +169,9 @@ with latest_tab:
         else:
             st.markdown("## 🔍 Self Review")
             st.info(
-                "Re-read each question and answer all of them before submitting. "
-                "No right/wrong feedback is shown until the complete review is submitted."
+                "Re-read the questions you are ready to work on. You may leave a question "
+                "unanswered if you do not understand the concept yet and return to it in a "
+                "later review. No right/wrong feedback is shown until you submit."
             )
 
             review_version = st.session_state.get("review_version", 0)
@@ -244,16 +245,16 @@ with latest_tab:
                     type="primary",
                     width="stretch",
                 ):
-                    unanswered = [
-                        row["question_number"]
-                        for row in remaining
-                        if not review_responses.get(row["question_id"])
+                    attempted_rows = [
+                        row for row in remaining
+                        if review_responses.get(row["question_id"])
                     ]
 
-                    if unanswered:
+                    if not attempted_rows:
                         st.error(
-                            "Answer every review question before submitting. Missing: "
-                            + ", ".join(map(str, unanswered))
+                            "Answer at least one question before submitting. "
+                            "Questions you do not understand yet can be left unanswered "
+                            "and reviewed later."
                         )
                     else:
                         existing_reviews = get_review_attempts(attempt_id)
@@ -261,7 +262,7 @@ with latest_tab:
                         review_score = 0
                         evaluated = []
 
-                        for row in remaining:
+                        for row in attempted_rows:
                             options = get_options(row["question_id"])
                             correct_letters = {
                                 option["option_letter"]
@@ -287,15 +288,18 @@ with latest_tab:
                             attempt_id,
                             review_number,
                             review_score,
-                            len(remaining),
+                            len(attempted_rows),
                             evaluated,
                         )
+
+                        skipped_count = len(remaining) - len(attempted_rows)
 
                         st.session_state.review_mode = False
                         st.session_state.review_result = {
                             "number": review_number,
                             "score": review_score,
-                            "total": len(remaining),
+                            "total": len(attempted_rows),
+                            "skipped": skipped_count,
                             "items": [
                                 (item["question_number"], item["is_correct"])
                                 for item in evaluated
@@ -313,9 +317,13 @@ with latest_tab:
         st.divider()
         st.markdown(f"### Self Review #{review_result['number']} Result")
         st.success(
-            f"Corrected **{review_result['score']} of {review_result['total']}** "
-            "questions in this review."
+            f"Corrected **{review_result['score']} of {review_result['total']} attempted** "
+            "question(s) in this review."
         )
+        if review_result.get("skipped", 0):
+            st.info(
+                f"{review_result['skipped']} question(s) were left for a later self-review."
+            )
         for qn, is_correct in review_result["items"]:
             st.write(
                 f"{'✅' if is_correct else '❌'} Question {qn} — "
