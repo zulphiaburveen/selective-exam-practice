@@ -30,6 +30,15 @@ def answer_text(selected_answer, options):
     )
 
 
+def reviewed_result_for_attempt(attempt):
+    total = int(attempt["total"])
+    original_score = int(attempt["score"])
+    corrected_count = len(corrected_question_ids(attempt["id"]))
+    reviewed_score = min(total, original_score + corrected_count)
+    reviewed_percentage = round(reviewed_score / total * 100, 1) if total else 0.0
+    return reviewed_score, reviewed_percentage, corrected_count
+
+
 # Always load the authoritative history for the student.
 # Publishing a different paper must never change which historical attempts exist.
 attempts = get_attempts(student)
@@ -75,12 +84,8 @@ with latest_tab:
     answers = get_attempt_answers(attempt_id)
     original_incorrect = [row for row in answers if not row["is_correct"]]
 
-    is_just_finished = (
-        attempt_id == st.session_state.get("current_attempt_id")
-        and st.session_state.get("_latest_attempt_snapshot", {}).get("id") == attempt_id
-    )
-
-    corrected_ids = set() if is_just_finished else corrected_question_ids(attempt_id)
+    # Always calculate review progress from persisted review data.
+    corrected_ids = corrected_question_ids(attempt_id)
     remaining = [
         row
         for row in original_incorrect
@@ -124,7 +129,7 @@ with latest_tab:
     with c3:
         st.metric("❌ Still to Review", len(remaining))
 
-    last_review = None if is_just_finished else latest_review_status(attempt_id)
+    last_review = latest_review_status(attempt_id)
     if last_review:
         st.caption(
             f"Latest self-review: #{last_review['review_number']} • "
@@ -377,20 +382,25 @@ with progress_tab:
             else None
         )
 
+        reviewed_score, reviewed_percentage, corrected_count = reviewed_result_for_attempt(row)
+
         history.append(
             {
                 "Attempt": i,
                 "Date": row["attempt_date"],
-                "Score": f"{row['score']}/{row['total']}",
-                "Score %": float(row["percentage"]),
+                "Original Score": f"{row['score']}/{row['total']}",
+                "Original Score %": float(row["percentage"]),
+                "After Review": f"{reviewed_score}/{row['total']}",
+                "After Review %": reviewed_percentage,
+                "Corrected in Review": corrected_count,
                 "Time": f"{minutes:02d}:{seconds:02d}",
                 "Exam Time": f"{timer_minutes} min" if timer_minutes else "Older attempt",
                 "Time Used %": time_used_percentage,
             }
         )
 
-    first_percentage = history[0]["Score %"]
-    latest_percentage = history[-1]["Score %"]
+    first_percentage = history[0]["Original Score %"]
+    latest_percentage = history[-1]["Original Score %"]
     change = round(latest_percentage - first_percentage, 1)
 
     m1, m2, m3, m4 = st.columns(4)
@@ -406,11 +416,11 @@ with progress_tab:
     chart_df = pd.DataFrame(history).set_index("Attempt")
     st.markdown("### Score & Time Comparison")
     st.caption(
-        "Score % shows accuracy. Time Used % shows how much of the selected exam time was used. "
-        "Compare them together rather than treating either measure alone as the goal."
+        "Original Score % is the exam result. After Review % includes questions later "
+        "corrected through self-review. Time Used % shows how much of the selected exam time was used."
     )
 
-    comparison_df = chart_df[["Score %", "Time Used %"]]
+    comparison_df = chart_df[["Original Score %", "After Review %", "Time Used %"]]
     if comparison_df["Time Used %"].notna().any():
         st.line_chart(comparison_df)
     else:
@@ -418,10 +428,10 @@ with progress_tab:
             "Time comparison will appear for new attempts. Older attempts were saved before "
             "the selected exam duration was recorded."
         )
-        st.line_chart(chart_df[["Score %"]])
+        st.line_chart(chart_df[["Original Score %", "After Review %"]])
 
     st.markdown("### Exam History")
     display_df = pd.DataFrame(history)[
-        ["Attempt", "Date", "Score", "Score %", "Time", "Exam Time", "Time Used %"]
+        ["Attempt", "Date", "Original Score", "Original Score %", "After Review", "After Review %", "Corrected in Review", "Time", "Exam Time", "Time Used %"]
     ]
     st.dataframe(display_df.iloc[::-1], hide_index=True, width="stretch")
