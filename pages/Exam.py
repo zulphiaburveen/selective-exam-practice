@@ -1,4 +1,5 @@
 import time
+import random
 from pathlib import Path
 
 import streamlit as st
@@ -40,6 +41,8 @@ DEFAULTS = {
     "exam_bundle": None,
     "go_to_results": False,
     "finish_saved_attempt_id": None,
+    "flagged_questions": set(),
+    "option_order": {},
 }
 
 for key, value in DEFAULTS.items():
@@ -154,6 +157,8 @@ def reset_exam():
 
     st.session_state.go_to_results = False
     st.session_state.finish_saved_attempt_id = None
+    st.session_state.flagged_questions = set()
+    st.session_state.option_order = {}
 
 
 # =======================================================
@@ -334,6 +339,10 @@ def finish_exam():
                 answer_rows=(
                     answer_rows
                 ),
+                option_order={
+                    str(qid): letters
+                    for qid, letters in st.session_state.option_order.items()
+                },
             )
 
     except Exception as e:
@@ -563,6 +572,9 @@ if not st.session_state.started:
 
         st.session_state.finish_saved_attempt_id = None
 
+        st.session_state.flagged_questions = set()
+        st.session_state.option_order = {}
+
         # -----------------------------------------------
         # LOAD COMPLETE EXAM ONCE
         # -----------------------------------------------
@@ -584,6 +596,14 @@ if not st.session_state.started:
                 st.session_state[
                     "exam_bundle"
                 ] = bundle
+
+                # Randomize once per attempt, keeping original letters as IDs.
+                st.session_state.option_order = {}
+                for q in bundle["questions"]:
+                    qid = q["id"]
+                    letters = [o["option_letter"] for o in bundle["options"].get(qid, [])]
+                    random.shuffle(letters)
+                    st.session_state.option_order[qid] = letters
 
         except Exception as e:
 
@@ -752,22 +772,31 @@ else:
         )
     )
 
+    # Original option letters are retained for scoring and saved answers.
+    # Only their displayed positions/labels are randomized.
+    original_options = {o["option_letter"]: o for o in options}
+    order = st.session_state.option_order.get(question_id)
+    if order is None or set(order) != set(original_options):
+        order = list(original_options)
+        random.shuffle(order)
+        st.session_state.option_order[question_id] = order
+    display_labels = {letter: chr(65 + pos) for pos, letter in enumerate(order)}
+    options = [original_options[letter] for letter in order]
+
     # ===================================================
     # HEADER
     # ===================================================
 
-    header_left, header_right = (
+    header_left, flag_col, header_right = (
         st.columns(
-            [4, 1]
+            [4, 1.2, 1.2]
         )
     )
 
     with header_left:
-
         st.caption(
             st.session_state.paper_name
         )
-
         st.title(
             f"Question "
             f"{index + 1} "
@@ -775,8 +804,27 @@ else:
             f"{len(questions)}"
         )
 
-    with header_right:
+    flagged_questions = st.session_state.flagged_questions
+    is_flagged = question_id in flagged_questions
 
+    with flag_col:
+        st.write("")
+        st.write("")
+        if st.button(
+            "🚩 Unflag" if is_flagged else "⚐ Flag",
+            key=f"flag_question_{question_id}",
+            type="primary" if is_flagged else "secondary",
+            width="stretch",
+        ):
+            if is_flagged:
+                flagged_questions.discard(question_id)
+            else:
+                flagged_questions.add(question_id)
+
+            st.session_state.flagged_questions = flagged_questions
+            st.rerun()
+
+    with header_right:
         st.metric(
             "⏱️ Time Left",
             f"{mins:02d}:"
@@ -820,18 +868,13 @@ else:
             "passage_image"
         ):
 
-            passage_path = Path(
-                question[
-                    "passage_image"
-                ]
+            passage_image = displayable_file(
+                question["passage_image"]
             )
 
-            if passage_path.exists():
-
+            if passage_image:
                 st.image(
-                    str(
-                        passage_path
-                    ),
+                    passage_image,
                     width="stretch"
                 )
 
@@ -865,18 +908,13 @@ else:
         "question_image"
     ):
 
-        question_path = Path(
-            question[
-                "question_image"
-            ]
+        question_image = displayable_file(
+            question["question_image"]
         )
 
-        if question_path.exists():
-
+        if question_image:
             st.image(
-                str(
-                    question_path
-                ),
+                question_image,
                 width=600
             )
 
@@ -939,7 +977,7 @@ else:
             index=selected_index,
             format_func=(
                 lambda letter:
-                    f"{letter}. "
+                    f"{display_labels[letter]}. "
                     f"{option_lookup[letter]}"
             ),
             key=(
@@ -982,7 +1020,7 @@ else:
             ]
 
             checked = st.checkbox(
-                f"{letter}. "
+                f"{display_labels[letter]}. "
                 f"{option['option_text']}",
                 value=(
                     letter
@@ -1023,11 +1061,42 @@ else:
         st.session_state.responses
     )
 
+    flagged_count = len(st.session_state.flagged_questions)
+    unanswered_count = len(questions) - answered_count
+
     st.caption(
-        f"Answered: "
-        f"{answered_count} / "
-        f"{len(questions)}"
+        f"Answered: {answered_count} / {len(questions)}  •  "
+        f"Unanswered: {unanswered_count}  •  "
+        f"Flagged: {flagged_count}"
     )
+
+    with st.expander("🧭 Question Navigator", expanded=False):
+        st.caption("✓ answered  •  ○ unanswered  •  🚩 flagged")
+
+        nav_columns = st.columns(10)
+
+        for nav_index, nav_question in enumerate(questions):
+            nav_id = nav_question["id"]
+            nav_number = nav_question["question_number"]
+            nav_answered = nav_id in st.session_state.responses
+            nav_flagged = nav_id in st.session_state.flagged_questions
+
+            if nav_flagged:
+                nav_label = f"🚩{nav_number}"
+            elif nav_answered:
+                nav_label = f"✓{nav_number}"
+            else:
+                nav_label = f"○{nav_number}"
+
+            with nav_columns[nav_index % 10]:
+                if st.button(
+                    nav_label,
+                    key=f"nav_question_{nav_id}",
+                    width="stretch",
+                ):
+                    st.session_state.question_index = nav_index
+                    st.session_state.confirm_finish = False
+                    st.rerun()
 
     st.divider()
 
@@ -1119,6 +1188,13 @@ else:
                 f"You still have "
                 f"{unanswered} "
                 f"unanswered question(s)."
+            )
+
+        flagged_count = len(st.session_state.flagged_questions)
+
+        if flagged_count:
+            st.warning(
+                f"You still have {flagged_count} flagged question(s) to recheck."
             )
 
         st.write(

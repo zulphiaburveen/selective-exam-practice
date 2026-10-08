@@ -124,6 +124,113 @@ else:
                 st.metric("Questions", question_count)
 
             st.divider()
+            st.markdown("#### ✏️ Edit Paper Details")
+
+            edit_key = f"edit_paper_{paper_id}"
+
+            if not st.session_state.get(edit_key, False):
+                if st.button(
+                    "✏️ Edit Paper Details",
+                    key=f"edit_button_{paper_id}",
+                    width="stretch",
+                ):
+                    st.session_state[edit_key] = True
+                    st.rerun()
+            else:
+                subject_choices = ["English", "Mathematics", "Science", "Other"]
+                current_subject = paper.get("subject") or "Other"
+                if current_subject not in subject_choices:
+                    subject_choices.append(current_subject)
+
+                with st.form(f"edit_paper_form_{paper_id}"):
+                    edited_name = st.text_input(
+                        "Paper Name",
+                        value=paper["name"],
+                    )
+
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        edited_subject = st.selectbox(
+                            "Subject",
+                            subject_choices,
+                            index=subject_choices.index(current_subject),
+                        )
+                    with ec2:
+                        try:
+                            current_year = int(paper["year"])
+                        except (TypeError, ValueError):
+                            current_year = 2022
+
+                        edited_year = st.number_input(
+                            "Year",
+                            min_value=2000,
+                            max_value=2100,
+                            value=current_year,
+                            step=1,
+                        )
+
+                    st.caption(
+                        "Paper ID and internal folder stay unchanged, so passages, questions, "
+                        "attempts and result history remain attached to this paper."
+                    )
+
+                    save_col, cancel_edit_col = st.columns(2)
+
+                    with save_col:
+                        save_edit = st.form_submit_button(
+                            "💾 Save Changes",
+                            type="primary",
+                            width="stretch",
+                        )
+
+                    with cancel_edit_col:
+                        cancel_edit = st.form_submit_button(
+                            "Cancel",
+                            width="stretch",
+                        )
+
+                if save_edit:
+                    clean_edited_name = (edited_name or "").strip()
+
+                    if not clean_edited_name:
+                        st.error("Paper name is required.")
+                    else:
+                        duplicate = (
+                            get_supabase()
+                            .table("papers")
+                            .select("id")
+                            .eq("name", clean_edited_name)
+                            .neq("id", paper_id)
+                            .limit(1)
+                            .execute()
+                            .data
+                        )
+
+                        if duplicate:
+                            st.error("Another paper with this name already exists.")
+                        else:
+                            try:
+                                get_supabase().table("papers").update(
+                                    {
+                                        "name": clean_edited_name,
+                                        "subject": edited_subject,
+                                        "year": str(int(edited_year)),
+                                    }
+                                ).eq("id", paper_id).execute()
+
+                                clear_data_cache()
+                                st.session_state.pop(edit_key, None)
+                                st.success("Paper details updated.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error("Unable to update paper details.")
+                                st.exception(e)
+
+                if cancel_edit:
+                    st.session_state.pop(edit_key, None)
+                    st.rerun()
+
+            st.divider()
 
             if published:
                 st.success("This is the current exam paper.")

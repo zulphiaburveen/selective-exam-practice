@@ -18,16 +18,37 @@ def parse_answer(value):
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
-def answer_text(selected_answer, options):
+def answer_text(selected_answer, options, display_map=None):
     letters = parse_answer(selected_answer)
     if not letters:
         return "Not Answered"
 
     lookup = {row["option_letter"]: row["option_text"] for row in options}
     return ", ".join(
-        f"{letter}. {lookup.get(letter, '')}"
+        f"{(display_map or {}).get(letter, letter)}. {lookup.get(letter, '')}"
         for letter in letters
     )
+
+
+def option_display_map(attempt, question_id, options):
+    """Return original-letter -> displayed-letter for the saved exam attempt."""
+    saved = attempt.get("option_order") or {}
+    if isinstance(saved, str):
+        import json
+        try:
+            saved = json.loads(saved)
+        except (ValueError, TypeError):
+            saved = {}
+    order = saved.get(str(question_id)) or saved.get(question_id)
+    original_letters = [option["option_letter"] for option in options]
+    if not isinstance(order, list) or len(order) != len(original_letters) or set(order) != set(original_letters):
+        order = original_letters
+    return {original: chr(65 + index) for index, original in enumerate(order)}
+
+
+def options_in_exam_order(attempt, question_id, options):
+    mapping = option_display_map(attempt, question_id, options)
+    return sorted(options, key=lambda option: mapping[option["option_letter"]])
 
 
 def reviewed_result_for_attempt(attempt):
@@ -203,9 +224,12 @@ with latest_tab:
                     if question_image:
                         st.image(question_image, width=600)
 
-                options = get_options(row["question_id"])
+                options = options_in_exam_order(
+                    attempt, row["question_id"], get_options(row["question_id"])
+                )
+                display_map = option_display_map(attempt, row["question_id"], options)
                 st.warning(
-                    f"Your exam answer: **{answer_text(row['selected_answer'], options)}**"
+                    f"Your exam answer: **{answer_text(row['selected_answer'], options, display_map)}**"
                 )
 
                 option_letters = [option["option_letter"] for option in options]
@@ -220,7 +244,7 @@ with latest_tab:
                         "Choose your new answer",
                         option_letters,
                         index=None,
-                        format_func=lambda letter, lookup=option_lookup: f"{letter}. {lookup[letter]}",
+                        format_func=lambda letter, lookup=option_lookup, labels=display_map: f"{labels[letter]}. {lookup[letter]}",
                         key=f"{base_key}_single",
                     )
                     review_responses[row["question_id"]] = [selected] if selected else []
@@ -230,7 +254,7 @@ with latest_tab:
                     for option in options:
                         letter = option["option_letter"]
                         if st.checkbox(
-                            f"{letter}. {option['option_text']}",
+                            f"{display_map[letter]}. {option['option_text']}",
                             key=f"{base_key}_{letter}",
                         ):
                             chosen.append(letter)

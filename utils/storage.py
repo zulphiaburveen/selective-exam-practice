@@ -834,7 +834,7 @@ def delete_question(question_id):
 
 def create_attempt(
     paper_id, student, score, total, percentage,
-    time_taken, timer_minutes, answer_rows
+    time_taken, timer_minutes, answer_rows, option_order=None
 ):
     sb = get_supabase()
 
@@ -848,6 +848,7 @@ def create_attempt(
             "percentage": float(percentage),
             "time_taken": int(time_taken),
             "timer_minutes": int(timer_minutes),
+            "option_order": option_order or {},
         })
         .execute()
         .data[0]
